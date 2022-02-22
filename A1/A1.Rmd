@@ -1,0 +1,355 @@
+---
+title: 'A1: Data set selection and initial processing'
+author: "Jedid Ahn"
+date: "February 21, 2022"
+output:
+  html_document:
+    df_print: paged
+---
+
+Start by installing and loading the required packages.
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("GEOquery", quietly = TRUE)) {
+  BiocManager::install("GEOquery")
+}
+
+if (!requireNamespace("biomaRt", quietly = TRUE)) {
+  BiocManager::install("biomaRt")
+}
+
+if (!requireNamespace("edgeR", quietly = TRUE)) {
+  BiocManager::install("edgeR")
+}
+
+if (!requireNamespace("limma", quietly = TRUE)) {
+  BiocManager::install("limma")
+}
+
+if (!requireNamespace("knitr", quietly = TRUE)){
+  install.packages("knitr")
+}
+    
+if (!requireNamespace("dplyr", quietly = TRUE)){
+  install.packages("dplyr")
+}
+
+library(BiocManager)
+library(GEOquery)
+library(biomaRt)
+library(edgeR)
+library(knitr)
+library(dplyr)
+```
+
+<br><hr><br>
+
+# 1. Download the data
+
+```{r}
+GEO <- "GSE66261"
+count_folder_path <- paste0(getwd(), "/", GEO)
+
+if (!dir.exists(count_folder_path)){
+  count_file_path <- rownames(GEOquery::getGEOSuppFiles(GEO))[1]
+} else{
+  count_file_path <- list.files(path = count_folder_path, full.names = TRUE)[1]
+}
+
+GSE66261 <- read.delim(count_file_path, header = TRUE, check.names = FALSE)
+```
+
+<br><hr><br>
+
+# 2. Assess
+
+Through the dim function, we see that the dataset has 51108 genes in total.
+```{r}
+dim(GSE66261)
+```
+
+Investigating further, we see that the column names are uninformative as they don't specify cell type (primary or effector) nor the condition (TH1, TH2, TH17). Before defining the groups, I will start by linking each column name to its respective GSM title listed on the website.
+```{r}
+colnames(GSE66261)
+```
+
+```{r}
+listed_titles <- colnames(GSE66261)[3:14]
+gsm_titles <- c("TH1_Primary_2695", "TH2_Primary_2695", "TH17_Primary_2695", "TH1_Effector_2695", "TH2_Effector_2695", "TH17_Effector_2695", "TH1_Primary_2960", "TH2_Primary_2960", "TH17_Primary_2960", "TH1_Effector_2960", "TH2_Effector_2960", "TH17_Effector_2960")
+  
+exp_names <- data.frame(listed_titles, gsm_titles)
+```
+
+
+Now, we can define the groups by patient, cell type, and condition.
+```{r}
+samples <- data.frame(lapply(exp_names$gsm_titles, 
+                             function(x) { rev(unlist(strsplit(x, split = "_"))) }))
+colnames(samples) <- listed_titles
+rownames(samples) <- c("library", "cell_type", "condition")
+samples <- data.frame(t(samples))
+```
+
+
+Next, we will get the summarized counts for each gene, and list only the top 10 of those have a count greater than 1. The two most abundant counts are shown to be Y_RNA and snoU13, which are small non-coding RNAs and small nucleolar RNA respectively. 
+```{r}
+summarized_gene_counts <- sort(table(GSE66261$Name), decreasing = TRUE)
+knitr::kable(summarized_gene_counts[which(summarized_gene_counts > 1)[1:10]], )
+```
+
+<br><hr><br>
+
+# 3. Filter
+
+At this point, the only filtering required is the removal of genes with low counts. Using edgeR protocol, features without at least 1 read per million in n of the samples were removed. Since there are 6 samples of each group, n = 6.
+```{r}
+n <- 6
+
+# Translate out counts into counts per million using the edgeR package.
+cpms = edgeR::cpm(GSE66261[, 3:14])
+rownames(cpms) <- GSE66261[, 1]
+
+# Get rid of low counts
+keep = rowSums(cpms > 1) >= n
+GSE66261_filtered = GSE66261[keep, ]
+```
+
+<br><hr><br>
+
+# 4. Map
+
+HUGO gene symbols were already provided in the dataset. Using the code below, it is confirmed that no gene symbols are missing.
+```{r}
+any(is.na(GSE66261_filtered$Name))
+```
+
+Nonetheless, we will map our Ensembl gene IDs for validation purposes.
+```{r}
+ensembl <- biomaRt::useMart("ensembl")
+ensembl <- biomaRt::useDataset("hsapiens_gene_ensembl", mart = ensembl)
+
+conversion_stash <- "GSE66261_id_conversion.rds"
+if(file.exists(conversion_stash)){
+  GSE66261_id_conversion <- readRDS(conversion_stash)
+} else {
+  GSE66261_id_conversion <- biomaRt::getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"), 
+                                         filters = c("ensembl_gene_id"),
+                                         values = GSE66261_filtered$Feature,
+                                         mart = ensembl)
+  saveRDS(GSE66261_id_conversion, conversion_stash)
+}
+```
+
+
+A join is performed to compare the original gene symbols with the symbols generated from the mapping.
+```{r}
+GSE66261_id_original <- GSE66261_filtered[ , c(1:2)]
+colnames(GSE66261_id_original) <- c("ensembl_gene_id", "hgnc_symbol_original")
+
+GSE66261_id_comparison <- dplyr::left_join(GSE66261_id_original, GSE66261_id_conversion, by = "ensembl_gene_id")
+```
+
+
+After mapping, a total of 1600 HUGO gene symbols are shown to be missing. This won't be an issue as the original HUGO gene symbols will be used.
+```{r}
+num_missing <- length(which(GSE66261_id_comparison$hgnc_symbol == "" | is.na(GSE66261_id_comparison$hgnc_symbol)))
+num_missing
+```
+
+
+Nearly 90% of the gene symbols line up. With this high level of accuracy, we will not update any original symbols with the symbols retrieved from biomaRt. This is to maintain consistency by utilizing a list of symbols all from the same library.
+```{r}
+num_matches <- length(which(GSE66261_id_comparison$hgnc_symbol_original == GSE66261_id_comparison$hgnc_symbol))
+
+num_matches / (nrow(GSE66261_id_comparison) - num_missing)
+```
+
+
+I will now locate the rows that map to the same symbol. There are 18 rows in total that consists of mappings to the same symbol.
+```{r}
+num_unique_genes <- length(unique(GSE66261_id_comparison$hgnc_symbol_original))
+num_total_genes <- length(GSE66261_id_comparison$hgnc_symbol_original)
+num_total_genes - num_unique_genes
+```
+
+Investigating these rows further, 2 rows can be kept by updating their original HUGO gene symbol with the mapped gene symbol. The rest will be dropped to avoid compromising normalization and downstream analysis.
+```{r}
+knitr::kable(GSE66261_id_comparison[which(duplicated(GSE66261_id_comparison$hgnc_symbol_original)), ])
+```
+
+```{r}
+any(GSE66261_filtered$Name == "RNY1P13")
+GSE66261_filtered$Name[which(GSE66261_filtered$Feature == "ENSG00000201900")] <- "RNY1P13"
+
+any(GSE66261_filtered$Name == "STRA6LP")
+GSE66261_filtered$Name[which(GSE66261_filtered$Feature == "ENSG00000254876")] <- "STRA6LP"
+```
+
+```{r}
+remove = duplicated(GSE66261_filtered$Name)
+GSE66261_filtered <- GSE66261_filtered[!remove, ]
+```
+
+<br><hr><br>
+
+# 5. Apply Normalization
+
+Before applying normalization, we will investigate the distribution of the dataset. Through the boxplot, we can see that there aren't significant differences in the mean for each sample.
+```{r}
+data2plot <- log2(edgeR::cpm(GSE66261_filtered[, 3:14]))
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM",
+las = 2, cex = 0.5, cex.lab = 0.5,
+cex.axis = 0.5, main = "GSE66261 RNASeq Samples - Original Counts")
+
+abline(h = median(apply(data2plot, 2, median)),
+col = "green", lwd = 0.6, lty = "dashed")
+```
+
+However, observing the density plot, it is clear that the samples follow a soft bimodal distribution (with a smaller left peak) rather than a normal distribution.
+```{r}
+counts_density <- apply(log2(edgeR::cpm(GSE66261_filtered[, 3:14])), 2, density)
+                        
+xlim <- 0
+ylim <- 0
+
+for (i in 1:length(counts_density)) {
+xlim <- range(c(xlim, counts_density[[i]]$x));
+ylim <- range(c(ylim, counts_density[[i]]$y))
+}
+cols <- rainbow(length(counts_density))
+ltys <- rep(1, length(counts_density))
+#plot the first density plot to initialize the plot
+plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",
+ylab="Smoothing density of log2-CPM", main="", cex.lab = 0.8)
+#plot each line
+for (i in 1:length(counts_density)){
+  lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+}
+#create legend
+legend("topright", colnames(data2plot),
+col=cols, lty=ltys, cex=0.75,
+border ="blue", text.col = "green4",
+merge = TRUE, bg = "gray90")
+```
+
+Trimmed means of M-value (TMM) was chosen as it a specialized normalization technique for RNASeq datasets. Normalizing by distribution wasn't a possibility since the count data is not normally distributed nor a true bimodal distribution.
+```{r}
+filtered_data_matrix <- as.matrix(GSE66261_filtered[, 3:14])
+rownames(filtered_data_matrix) <- GSE66261_filtered$Name
+d = edgeR::DGEList(counts = filtered_data_matrix, group = samples$cell_type)
+```
+
+
+Then, the normalization factors were added. Finally, HUGO symbols were added as the row names to the normalized data frame.
+```{r}
+d = edgeR::calcNormFactors(d)
+normalized_counts <- as.data.frame(edgeR::cpm(d))
+rownames(normalized_counts) <- GSE66261_filtered$Name
+```
+
+
+Next, an MDS plot was generated to observe separation of samples. We can see that the groupings are favourable as it is clustering according to condition rather than library or cell type. We observe that TH1 and TH2 samples cluster all together as they are both involved in immune response, while TH17 samples cluster together separately from TH1 and TH2.
+```{r}
+limma::plotMDS(d, labels = rownames(samples), col = c("darkgreen", "blue")[factor(samples$cell_type)])
+```
+
+Observing the boxplot, the median CPM value for all 12 samples after normalization still approaches the median line. The differences in the boxplots before and after normalization are negligible.
+```{r}
+data2plot <- log2(edgeR::cpm(normalized_counts))
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM",
+las = 2, cex = 0.5, cex.lab = 0.5,
+cex.axis = 0.5, main = "GSE66261 RNASeq Samples - Normalized")
+
+abline(h = median(apply(data2plot, 2, median)),
+col = "green", lwd = 0.6, lty = "dashed")
+```
+
+
+Observing the density plot, we can also see that normalization has had a negligible impact on the distribution of the count data, as it is still showing a soft bimodal distribution. More analysis is required to determine if there are possible outliers that could be skewing the distribution.
+```{r}
+counts_density_after <- apply(log2(edgeR::cpm(normalized_counts)), 2, density)
+                        
+xlim <- 0
+ylim <- 0
+
+for (i in 1:length(counts_density_after)) {
+xlim <- range(c(xlim, counts_density_after[[i]]$x));
+ylim <- range(c(ylim, counts_density_after[[i]]$y))
+}
+cols <- rainbow(length(counts_density_after))
+ltys <- rep(1, length(counts_density_after))
+#plot the first density plot to initialize the plot
+plot(counts_density_after[[1]], xlim=xlim, ylim=ylim, type="n",
+ylab="Smoothing density of log2-CPM", main="", cex.lab = 0.8)
+#plot each line
+for (i in 1:length(counts_density_after)){
+  lines(counts_density_after[[i]], col=cols[i], lty=ltys[i])
+}
+#create legend
+legend("topright", colnames(data2plot),
+col=cols, lty=ltys, cex=0.75,
+border ="blue", text.col = "green4",
+merge = TRUE, bg = "gray90")
+```
+
+Finally, we will calculate dispersion to determine how much variance deviates from the mean.
+```{r}
+model_design <- model.matrix(~samples$library
++ samples$cell_type + 0)
+d <- edgeR::estimateDisp(d, model_design)
+```
+
+
+The BCV plot confirms the trend of more gene expression leading to dispersion values being closer together, and less variation overall. This confirms the consensus that genes with more counts will have smaller variations between samples than genes with fewer counts. Overall, this shows that normalization led to an ideal mean variance relationship, confirming that the dataset is now suitable for downstream analysis.
+```{r}
+edgeR::plotBCV(d,col.tagwise = "black", col.common = "red")
+```
+<br><hr><br>
+
+# 6. Interpret and document
+
+### What are the control and test conditions of the dataset?
+The control condition was the culturing of primary cells under TH1, TH2, and TH17 polarizing conditions. On the other hand, the test condition consisted of the culturing of effector cells under the same three polarizing conditions.
+
+### Why is the dataset of interest to you?
+This dataset intrigued me as I am interested in learning more about the role and expression of lncRNAs in human lymphocytes.
+
+### Were there expression values that were not unique for specific genes? How did you handle these?
+Yes, there were 18 genes that were not unique. 2 genes were handled by updating with alternative HUGO mapped symbol from biomaRt, while the remaining 16 were dropped.
+
+### Were there expression values that could not be mapped to current HUGO symbols?
+No, as all HUGO symbols already existed (and none were missing) as part of the original dataset.
+
+### How many outliers were removed?
+There were no outliers that were removed manually. Rather, only genes with low counts were filtered out.
+
+### How did you handle replicates?
+There are 2 technical replicates: Libraries 2695 and 2960. Library 2695 was constructed using the Illumina TruSeq Stranded mRNA kit while library 2960 was constructed using the Illumina TruSeq Stranded Total RNA kit.
+
+### What is the final coverage of your dataset?
+It is 29.38%.
+```{r}
+nrow(normalized_counts) / nrow(GSE66261)
+```
+
+### FINAL DATASET
+```{r}
+normalized_counts
+```
+
+Each row is confirmed to have a unique HUGO symbol.
+```{r}
+nrow(normalized_counts)
+length(unique(rownames(normalized_counts)))
+```
+
+<br><hr><br>
+
+# 7. References
+
+1. Isserlin, Ruth. (2022, February 13). *BCB420: Lecture 4 - Exploring the data and basics of Normalization* [PDF slides].
+
+2. Isserlin, Ruth. (2022, February 15). *BCB420: Lecture 5 - Data exploration and Identifier mapping* [PDF slides].
