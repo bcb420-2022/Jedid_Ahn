@@ -1,0 +1,304 @@
+---
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+params:
+  title: 'BCB420 Assignment #2: Differential Gene expression and Preliminary ORA'
+  author: 'Jedid Ahn'
+bibliography: references.bib
+csl: apa.csl
+---
+
+```{r warning=FALSE,message=FALSE}
+# Libraries to install here.
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("GEOquery", quietly = TRUE)) {
+  BiocManager::install("GEOquery")
+}
+
+if (!requireNamespace("edgeR", quietly = TRUE)) {
+  BiocManager::install("edgeR")
+}
+
+if (!requireNamespace("limma", quietly = TRUE)) {
+  BiocManager::install("limma")
+}
+
+if (!requireNamespace("circlize", quietly = TRUE)) {
+  install.packages("circlize")
+}
+
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) {
+  BiocManager::install("ComplexHeatmap")
+}
+
+# Libraries to load here.
+library(Biobase)
+library(GEOquery)
+library(edgeR)
+library(limma)
+library(circlize)
+library(ComplexHeatmap)
+
+# Figure count: Start at 1.
+count <- 1
+```
+
+---
+title: `r params$title`
+author: `r params$author`
+date: `r format(Sys.Date(), format = '%B %d, %Y')`
+documentclass: article
+fontsize: 10pt
+geometry: margin=2.54cm
+---
+
+<br><br>
+
+# Introduction
+
+## GEO dataset
+The GEO dataset that I chose was GSE66261, which examines the expression and functions of long noncoding RNAs during human T helper cell differentiation.
+```{r message=FALSE}
+GEO <- "GSE66261"
+count_folder_path <- paste0(getwd(), "/", GEO)
+
+if (!dir.exists(count_folder_path)){
+  count_file_path <- rownames(GEOquery::getGEOSuppFiles(GEO))[1]
+} else{
+  count_file_path <- list.files(path = count_folder_path, full.names = TRUE)[1]
+}
+
+GSE66261 <- read.delim(count_file_path, header = TRUE, check.names = FALSE)
+```
+
+
+To better understand the data, groups were defined by formatting according to library, cell type, and condition. There are 2 libraries: 2695 and 2960, 2 cell types: Primary and effector, and 3 conditions: TH1, TH2, and TH17.
+```{r}
+listed_titles <- colnames(GSE66261)[3:14]
+gsm_titles <- c("TH1_Primary_2695", "TH2_Primary_2695", "TH17_Primary_2695", "TH1_Effector_2695", "TH2_Effector_2695", "TH17_Effector_2695", "TH1_Primary_2960", "TH2_Primary_2960", "TH17_Primary_2960", "TH1_Effector_2960", "TH2_Effector_2960", "TH17_Effector_2960")
+  
+exp_names <- data.frame(listed_titles, gsm_titles)
+
+samples <- data.frame(lapply(exp_names$gsm_titles, 
+                             function(x) { rev(unlist(strsplit(x, split = "_"))) }))
+colnames(samples) <- listed_titles
+rownames(samples) <- c("library", "cell_type", "condition")
+samples <- data.frame(t(samples))
+```
+
+<br>
+
+## Filtering
+Before normalization, the dataset was filtered by removing genes with low counts. Using edgeR protocol, features without at least 1 read per million in n of the samples were removed. Since there are 6 samples of each group, n = 6.
+```{r}
+n <- 6
+
+# Translate out counts into counts per million using the edgeR package.
+cpms = edgeR::cpm(GSE66261[, 3:14])
+rownames(cpms) <- GSE66261[, 1]
+
+# Get rid of low counts
+keep = rowSums(cpms > 1) >= n
+GSE66261_filtered = GSE66261[keep, ]
+rownames(GSE66261) <- 1:nrow(GSE66261)
+```
+
+<br>
+
+## HUGO gene symbols
+The original dataset already came with HUGO gene symbols, so no mapping of symbols was required. In addition, tests showed that nearly 90% of symbols lined up with the symbols obtained from biomaRt.
+
+Tests showed that there were 18 rows in total that consists of mappings to the same symbol. Two rows were updated by replacing their original HUGO gene symbol with the mapped gene symbol, while the rest were dropped to avoid compromising normalization and downstream analysis.
+```{r}
+any(GSE66261_filtered$Name == "RNY1P13")
+GSE66261_filtered$Name[which(GSE66261_filtered$Feature == "ENSG00000201900")] <- "RNY1P13"
+
+any(GSE66261_filtered$Name == "STRA6LP")
+GSE66261_filtered$Name[which(GSE66261_filtered$Feature == "ENSG00000254876")] <- "STRA6LP"
+
+remove = duplicated(GSE66261_filtered$Name)
+GSE66261_filtered <- GSE66261_filtered[!remove, ]
+```
+
+<br>
+
+## Normalization
+Trimmed means of M-value (TMM) was chosen as the normalization technique as it a specialized normalization technique for RNASeq datasets.
+```{r}
+filtered_data_matrix <- as.matrix(GSE66261_filtered[, 3:14])
+rownames(filtered_data_matrix) <- GSE66261_filtered$Name
+d = edgeR::DGEList(counts = filtered_data_matrix, group = samples$cell_type)
+
+d = edgeR::calcNormFactors(d)
+normalized_counts <- as.data.frame(edgeR::cpm(d))
+rownames(normalized_counts) <- GSE66261_filtered$Name
+```
+
+<br>
+
+Through the MDS plot as shown in Figure `r count`, we can see that groupings are favourable as it is clustering according to condition rather than library or cell type. 
+```{r echo=FALSE,warning=FALSE,message=FALSE,out.width="100%",fig.cap="Figure 1: We observe that TH1 and TH2 samples cluster all together as they are both involved in immune response, while TH17 samples cluster together separately from TH1 and TH2."}
+limma::plotMDS(d, labels = rownames(samples), col = c("darkgreen", "blue")[factor(samples$cell_type)])
+
+count <- count + 1
+```
+
+<br>
+
+By observing the boxplot as shown in Figure `r count`, we can visualize the distribution of the data. 
+```{r echo=FALSE,warning=FALSE,message=FALSE,fig.cap="Figure 2: The boxplot shows that there aren't significant differences in the mean for each sample after normalization."}
+data2plot <- log2(edgeR::cpm(normalized_counts))
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM",
+las = 2, cex = 0.5, cex.lab = 0.5,
+cex.axis = 0.5, main = "GSE66261 RNASeq Samples - Normalized")
+
+abline(h = median(apply(data2plot, 2, median)),
+col = "green", lwd = 0.6, lty = "dashed")
+
+count <- count + 1
+```
+
+<br>
+
+On the other hand, the density plot as shown in Figure `r count` shows that the data follows a soft bimodal distribution.
+```{r echo=FALSE,warning=FALSE,message=FALSE,out.width="100%",fig.cap="Figure 3: The soft bimodal distribution is something to keep in mind when performing differential expression analysis."}
+counts_density_after <- apply(log2(edgeR::cpm(normalized_counts)), 2, density)
+                        
+xlim <- 0
+ylim <- 0
+
+for (i in 1:length(counts_density_after)) {
+xlim <- range(c(xlim, counts_density_after[[i]]$x));
+ylim <- range(c(ylim, counts_density_after[[i]]$y))
+}
+cols <- rainbow(length(counts_density_after))
+ltys <- rep(1, length(counts_density_after))
+#plot the first density plot to initialize the plot
+plot(counts_density_after[[1]], xlim=xlim, ylim=ylim, type="n",
+ylab="Smoothing density of log2-CPM", main="", cex.lab = 0.8)
+#plot each line
+for (i in 1:length(counts_density_after)){
+  lines(counts_density_after[[i]], col=cols[i], lty=ltys[i])
+}
+#create legend
+legend("topright", colnames(data2plot),
+col=cols, lty=ltys, cex=0.75,
+border ="blue", text.col = "green4",
+merge = TRUE, bg = "gray90")
+
+count <- count + 1
+```
+
+<br>
+
+Finally, we calculated dispersion as shown in Figure `r count` to determine how much variance deviates from the mean.
+```{r echo=FALSE,warning=FALSE,message=FALSE,out.width="100%",fig.cap="Figure 4: The BCV plot confirms the trend of more gene expression leading to dispersion values being closer together, and less variation overall."}
+model_design <- model.matrix(~samples$library + samples$cell_type + 0)
+d <- edgeR::estimateDisp(d, model_design)
+edgeR::plotBCV(d,col.tagwise = "black", col.common = "red")
+
+count <- count + 1
+```
+
+<br>
+
+## This is our final dataset of normalized counts, which will be used for differential expression analysis.
+```{r eval=FALSE}
+normalized_counts
+```
+
+<br><br>
+
+# Differential expression analysis
+
+## Linear model
+Before running differential expression analysis, we have to create a linear model in R by creating a design matrix. We will account for both library variability and the condition of interest, which is contributing to the differential expression. This is demonstrated by the MDS plot shown in Figure 1, where samples are clustering according to condition.
+```{r}
+model_design <- model.matrix(~ samples$library + samples$condition)
+```
+
+Fit the normalized counts to the model design created.
+```{r}
+expression_mat <- as.matrix(normalized_counts)
+minimal_set <- Biobase::ExpressionSet(assayData = expression_mat)
+fit <- limma::lmFit(minimal_set, model_design)
+```
+
+
+## Computation and multiple hyothesis testing
+Then, we use empirical Bayes to compute differential expression.
+```{r}
+fit2 <- limma::eBayes(fit, trend = TRUE)
+```
+
+The Benjamini Hochberg method was used as the paper associated with the experiment specified that false discovery rate was used to correct for multiple testing.
+```{r}
+output_hits <- limma::topTable(fit2, coef = ncol(model_design), adjust.method = "BH", number = nrow(expression_mat))
+
+# Then, we sort by pvalue
+output_hits <- output_hits[order(output_hits$P.Value),]
+```
+
+
+2376 genes are differentially expressed pass the threshold p-value of 0.05. 0.05 was chosen as it is the most commonly used cutoff for significance, which signifies a 95% chance that differential expression would not be observed if the condition had no effect.
+```{r}
+length(which(output_hits$P.Value < 0.05))
+```
+
+
+On the other hand, 504 genes pass correction.
+```{r}
+length(which(output_hits$adj.P.Val < 0.05))
+```
+
+## MA plot
+We can visualize the amount of differentially expressed genes using an MA plot as shown in Figure `r count`. limma's plotMA function was used.
+```{r echo=FALSE,warning=FALSE,message=FALSE,out.width="100%",fig.cap="Figure 5: Differentially expressed genes are coloured and bolded in red."}
+limma::plotMA(minimal_set, status = output_hits$P.Value < 0.05, main = "Differentially expressed genes with pval < 0.05")
+
+count <- count + 1
+```
+
+
+## Heatmap
+Next, we will create a heatmap to visualize upregulation and downregulation of the top hits in the data according to a colour scale. Based on Figure `r count`, We see that the conditions are clustered together due to the following groupings: <br>
+
+-TA-4 = TH1 and -TA-1 = TH1 <br>
+-TA-2 = TH2 and -TA-5 = TH2 <br>
+-TA-6 = TH17 and -TA-3 = TH17
+```{r echo=FALSE,warning=FALSE,message=FALSE}
+heatmap_matrix <- normalized_counts
+top_hits <- rownames(output_hits)[output_hits$P.Value < 0.05]
+heatmap_matrix_tophits <- t(
+  scale(t(heatmap_matrix[which(rownames(heatmap_matrix) %in% top_hits),]))
+  )
+
+if(min(heatmap_matrix_tophits) == 0){
+  heatmap_col = colorRamp2(c( 0, max(heatmap_matrix_tophits)), c( "white", "red"))
+} else {
+  heatmap_col = colorRamp2(c(min(heatmap_matrix_tophits), 0,
+                             max(heatmap_matrix_tophits)), c("blue", "white", "red"))
+}
+
+heatmap <- ComplexHeatmap::Heatmap(as.matrix(heatmap_matrix_tophits),
+                                           cluster_rows = TRUE,
+                                           cluster_columns = TRUE,
+                                           show_row_dend = TRUE,
+                                           show_column_dend = TRUE,
+                                           col = heatmap_col,
+                                           show_column_names = TRUE,
+                                           show_row_names = FALSE,
+                                           show_heatmap_legend = TRUE
+                                           )
+```
+
+```{r echo=FALSE,warning=FALSE,message=FALSE,out.width="100%",fig.cap="Figure 6: Not only are the conditions clustered together, but their genes show similar patterns of upregulation and downregulation."}
+heatmap
+```
+
+# Thresholded over-representation analysis
