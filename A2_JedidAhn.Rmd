@@ -10,6 +10,8 @@ bibliography: references.bib
 csl: apa.csl
 ---
 
+<br><br>
+
 ```{r warning=FALSE,message=FALSE}
 # Libraries to install here.
 if (!requireNamespace("BiocManager", quietly = TRUE)) {
@@ -36,6 +38,10 @@ if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) {
   BiocManager::install("ComplexHeatmap")
 }
 
+if (!requireNamespace("gprofiler2", quietly = TRUE)) {
+  install.packages("gprofiler2")
+}
+
 # Libraries to load here.
 library(Biobase)
 library(GEOquery)
@@ -43,6 +49,7 @@ library(edgeR)
 library(limma)
 library(circlize)
 library(ComplexHeatmap)
+library(gprofiler2)
 
 # Figure count: Start at 1.
 count <- 1
@@ -229,14 +236,15 @@ minimal_set <- Biobase::ExpressionSet(assayData = expression_mat)
 fit <- limma::lmFit(minimal_set, model_design)
 ```
 
+<br>
 
-## Computation and multiple hyothesis testing
+## Computation and multiple hypothesis testing
 Then, we use empirical Bayes to compute differential expression.
 ```{r}
 fit2 <- limma::eBayes(fit, trend = TRUE)
 ```
 
-The Benjamini Hochberg method was used as the paper associated with the experiment specified that false discovery rate was used to correct for multiple testing.
+**(Answer to Q2)** The Benjamini Hochberg method was used as the paper associated with the experiment specified that false discovery rate was used to correct for multiple testing.
 ```{r}
 output_hits <- limma::topTable(fit2, coef = ncol(model_design), adjust.method = "BH", number = nrow(expression_mat))
 
@@ -245,28 +253,37 @@ output_hits <- output_hits[order(output_hits$P.Value),]
 ```
 
 
-2376 genes are differentially expressed pass the threshold p-value of 0.05. 0.05 was chosen as it is the most commonly used cutoff for significance, which signifies a 95% chance that differential expression would not be observed if the condition had no effect.
+**(Answer to Q1)** 2376 genes are differentially expressed pass the threshold p-value of 0.05. 0.05 was chosen as it is the most commonly used cutoff for significance, which signifies a 95% chance that differential expression would not be observed if the condition had no effect.
 ```{r}
 length(which(output_hits$P.Value < 0.05))
 ```
 
 
-On the other hand, 504 genes pass correction.
+**(Answer to Q2)** On the other hand, 504 genes pass correction.
 ```{r}
 length(which(output_hits$adj.P.Val < 0.05))
 ```
+<br>
 
-## MA plot
-We can visualize the amount of differentially expressed genes using an MA plot as shown in Figure `r count`. limma's plotMA function was used.
+## MA plots
+**(Answer to Q3)** We can visualize the amount of differentially expressed genes using an MA plot as shown in Figure `r count`. limma's plotMA function was used. Based on the plot, we can see that nearly all differentially expressed genes have an expression log-ratio and average log-ratio close to 0.
 ```{r echo=FALSE,warning=FALSE,message=FALSE,out.width="100%",fig.cap="Figure 5: Differentially expressed genes are coloured and bolded in red."}
 limma::plotMA(minimal_set, status = output_hits$P.Value < 0.05, main = "Differentially expressed genes with pval < 0.05")
 
 count <- count + 1
 ```
+<br>
 
+**(Answer to Q3)** As shown in Figure `r count`, we will now investigate RAD50 in more detail as the lncRNA cluster in humans overlap the RAD50 gene according to the paper. 
+```{r echo=FALSE,warning=FALSE,message=FALSE,out.width="100%",fig.cap="Figure 6: We can see that the MA plot shows a high degree of confidence in RAD50 that it is differentially expressed and has high regulation."}
+limma::plotMA(minimal_set, status = rownames(output_hits) == "RAD50", main = "Examination of RAD50 gene")
+
+count <- count + 1
+```
+<br>
 
 ## Heatmap
-Next, we will create a heatmap to visualize upregulation and downregulation of the top hits in the data according to a colour scale. Based on Figure `r count`, We see that the conditions are clustered together due to the following groupings: <br>
+**(Answer to Q4)** Next, we will create a heatmap to visualize upregulation and downregulation of the top hits in the data according to a colour scale. Based on Figure `r count`, we see that the conditions are clustered together due to the following groupings: <br>
 
 -TA-4 = TH1 and -TA-1 = TH1 <br>
 -TA-2 = TH2 and -TA-5 = TH2 <br>
@@ -279,26 +296,157 @@ heatmap_matrix_tophits <- t(
   )
 
 if(min(heatmap_matrix_tophits) == 0){
-  heatmap_col = colorRamp2(c( 0, max(heatmap_matrix_tophits)), c( "white", "red"))
+  heatmap_col = colorRamp2(c(0, max(heatmap_matrix_tophits)), c("white", "red"))
 } else {
   heatmap_col = colorRamp2(c(min(heatmap_matrix_tophits), 0,
                              max(heatmap_matrix_tophits)), c("blue", "white", "red"))
 }
 
 heatmap <- ComplexHeatmap::Heatmap(as.matrix(heatmap_matrix_tophits),
-                                           cluster_rows = TRUE,
-                                           cluster_columns = TRUE,
-                                           show_row_dend = TRUE,
-                                           show_column_dend = TRUE,
-                                           col = heatmap_col,
-                                           show_column_names = TRUE,
-                                           show_row_names = FALSE,
-                                           show_heatmap_legend = TRUE
-                                           )
+                                   cluster_rows = TRUE,
+                                   cluster_columns = TRUE,
+                                   show_row_dend = TRUE,
+                                   show_column_dend = TRUE,
+                                   col = heatmap_col,
+                                   show_column_names = TRUE,
+                                   show_row_names = FALSE,
+                                   show_heatmap_legend = TRUE
+                                   )
 ```
 
-```{r echo=FALSE,warning=FALSE,message=FALSE,out.width="100%",fig.cap="Figure 6: Not only are the conditions clustered together, but their genes show similar patterns of upregulation and downregulation."}
+```{r echo=FALSE,warning=FALSE,message=FALSE,out.width="100%",fig.cap="Figure 7: Not only are the conditions clustered together, but their genes show similar patterns of upregulation and downregulation."}
 heatmap
+count <- count + 1
 ```
+<br><br>
 
 # Thresholded over-representation analysis
+
+**(Answer to Q1)** Since we are focused on threshold calculation rather than rank calculation, options included DAVID, EnrichR, and g:Profiler. g:Profiler was used due to familiarity and because it is a popular tool for functional enrichment analysis and visualization of gene lists. g:Profiler was used through the gprofiler2 R package rather than through their web browser.
+
+<br>
+
+## Create thresholded list of genes
+I will start by creating a thresholded list of genes, by calculating their rank and then retrieving upregulated and downregulated genes that are significant (pval < 0.05).
+```{r}
+output_hits[, "rank"] <- -log(output_hits$P.Value, base = 10) * sign(output_hits$logFC)
+output_hits <- output_hits[order(output_hits$rank), ]
+
+upregulated_genes <- rownames(output_hits)[which(output_hits$P.Value < 0.05 & 
+                                                   output_hits$logFC > 0)]
+downregulated_genes <- rownames(output_hits)[which(output_hits$P.Value < 0.05 & 
+                                                   output_hits$logFC < 0)]
+all_genes <- rownames(output_hits)
+```
+
+To present the results, I will store them in tables.
+```{r warning=FALSE}
+dir.create(paste0(getwd(), "/data"))
+
+write.table(x = upregulated_genes,
+            file = file.path("data", "GSE66261_upregulated_genes.txt"), sep = "\t",
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+write.table(x = downregulated_genes,
+            file=file.path("data","GSE66261_downregulated_genes.txt"), sep = "\t",
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+write.table(x = data.frame(genename = rownames(output_hits), F_stat = output_hits$rank),
+            file = file.path("data", "GSE66261_ranked_genelist.txt"), sep = "\t",
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+```
+
+
+There are 1035 upregulated genes that are significant.
+```{r}
+length(upregulated_genes)
+```
+On the other hand, there are 1341 upregulated genes that are significant.
+```{r}
+length(downregulated_genes)
+```
+<br>
+
+## Gene set enrichment analysis using g:Profiler
+**(Answer to Q2)** To maintain consistency with the differential expression analysis, Benjamini Hochberg FDR was used as the correction method for multiple hypothesis testing. Unfortunately, the corresponding paper for GSE66261 did not specify which annotation sources that they used for gene set enrichment. <br>
+
+GO:BP was used as gene ontology is a popular source for identifying relevant biological processes. In addition, KEGG, Reactome (REAC), and Wiki Pathways (WP) were all included as parameters due to a specific interest in learning the biological pathways associated with the genes of interest. Version 0.2.1 of the R package gprofiler2 was used, which is presumed to use the same version as the web browser tool. The web g:Profiler version is e105_eg52_p16_e84549, which was last updated on 03/01/2022.
+```{r}
+gost_res <- gprofiler2::gost(all_genes, organism = "hsapiens", 
+                             correction_method = c("fdr"),
+                             user_threshold = 0.05,
+                             sources = c("GO:BP", "KEGG", "REAC", "WP"))
+
+```
+
+**(Answer to Q3)** A p-value threshold of 0.05 was used as previously done for differential expression analysis. 3862 genesets were returned in total, with nearly 75% (2861 out of 3862) coming from GO:BP.
+```{r}
+nrow(gost_res$result)
+table(gost_res$result$source)
+```
+
+**(Answer to Q3)** If the p-value threshold is set to a more stringent value of 0.01, 3026 genesets are returned instead.
+```{r}
+gost_res_stringent <- gprofiler2::gost(all_genes, organism = "hsapiens", 
+                                       correction_method = c("fdr"),
+                                       user_threshold = 0.01,
+                                       sources = c("GO:BP", "KEGG", "REAC", "WP"))
+
+nrow(gost_res_stringent$result)
+table(gost_res_stringent$result$source)
+```
+
+Observing the plot function that gprofiler2 provides as shown in Figure `r count`, the term names whose -log10(p-adj) value is greater than 16 are the most significant and the ones that we are most interested in.
+```{r echo=FALSE,warning=FALSE,message=FALSE,out.width="100%",fig.cap="Figure 8: Despite the visualization, it is hard to gauge the number of term names that we are most interested in in due to the capping of values whose -log10(p-adj) > 16."}
+gprofiler2::gostplot(gost_res)
+count <- count + 1
+```
+
+<br>
+
+## Upregulated vs downregulated g:Profiler analysis
+**(Answer to Q4)** Next, we will run the g:Profiler analysis against the upregulated and downregulated genes both, with a threshold of 0.05.
+```{r}
+gost_res_up <- gprofiler2::gost(upregulated_genes, organism = "hsapiens", 
+                                correction_method = c("fdr"),
+                                user_threshold = 0.05,
+                                sources = c("GO:BP", "KEGG", "REAC", "WP"))
+```
+
+```{r}
+gost_res_down <- gprofiler2::gost(downregulated_genes, organism = "hsapiens", 
+                                  correction_method = c("fdr"),
+                                  user_threshold = 0.05,
+                                  sources = c("GO:BP", "KEGG", "REAC", "WP"))
+```
+
+<br>
+
+**(Answer to Q4)** Using all genes, we see that the term names that are most enriched are involved in metabolic and biosynthetic processes.
+```{r}
+knitr::kable(gost_res$result$term_name[1:10])
+```
+
+<br>
+
+**(Answer to Q4)** Using only upregulated genes that are significant, we see that the term names that are most enriched are still involved in metabolic and biosynthetic processes.
+```{r}
+knitr::kable(gost_res_up$result$term_name[1:10])
+```
+
+<br>
+
+**(Answer to Q4)** On the other hand, enrichment of downregulated genes that are significant show term names that are involved in immune response and regulation as well as response to stimuli. Based on the results using all genes, this shows that upregulated genes dominate the landscape by contributing more to differential expression and downstream pathways.
+```{r}
+knitr::kable(gost_res_down$result$term_name[1:10])
+```
+
+<br><br>
+
+# Interpretation
+
+1.
+
+<br>
+
+2.
